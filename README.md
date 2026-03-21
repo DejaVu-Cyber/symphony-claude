@@ -22,10 +22,55 @@ Compared with the original upstream Symphony repository, this fork adds and docu
 - Claude CLI orchestration in the Elixir implementation
 - Claude-compatible workflow configuration via `agent.adapter: claude`
 - support for Anthropic-compatible Claude backends such as MiniMax
+- Claude-aware stall timeout selection during orchestration
+- Claude token accounting and rate-limit handling in the orchestrator
 - dashboard runtime labeling for Codex, Claude, and Claude-via-MiniMax
 - dashboard error visibility improvements and live estimated token reporting for Claude sessions
+- normalized adapter/event plumbing so non-Codex runtimes can run through the same orchestration loop
 
-The detailed setup and workflow examples live in [elixir/README.md](elixir/README.md).
+## Workflow Changes
+
+The main workflow-level change from upstream is that this fork is no longer Codex-only.
+
+- `agent.adapter` can now be set to `codex` or `claude`
+- `claude:` is now a first-class config block alongside `codex:`
+- the checked-in example workflow in this fork currently defaults to Claude
+
+The concrete `WORKFLOW.md` additions that make Claude integration work are:
+
+```yaml
+agent:
+  adapter: claude
+
+claude:
+  command: claude
+  model: claude-sonnet-4-6
+  permission_mode: bypassPermissions
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+    - Edit
+    - Glob
+    - Grep
+  max_turns: 30
+  api_key: $ANTHROPIC_API_KEY
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
+```
+
+Compared with the original Codex-only workflow shape, the key additions are:
+
+- `agent.adapter: claude`
+- the entire `claude:` config block
+- Claude-specific runtime controls such as `permission_mode`, `allowed_tools`, and timeout values
+
+If you route Claude through an Anthropic-compatible provider such as MiniMax, the effective model
+can come from environment variables like `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL`, even if the
+workflow still contains a `claude.model` value.
+
+The detailed setup and the fuller Elixir-specific configuration notes live in
+[elixir/README.md](elixir/README.md).
 
 ## Running Symphony
 

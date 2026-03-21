@@ -131,33 +131,8 @@ Upstream workflow users should note these fork-specific changes:
 - `claude:` is a first-class config block alongside `codex:`
 - the shipped example `WORKFLOW.md` in this fork defaults to Claude
 - the dashboard now reads runtime/provider details from both workflow config and environment
-- the concrete `WORKFLOW.md` additions that enable Claude integration are:
-
-```yaml
-agent:
-  adapter: claude
-
-claude:
-  command: claude
-  model: claude-sonnet-4-6
-  permission_mode: bypassPermissions
-  allowed_tools:
-    - Bash
-    - Read
-    - Write
-    - Edit
-    - Glob
-    - Grep
-  max_turns: 30
-  api_key: $ANTHROPIC_API_KEY
-  turn_timeout_ms: 3600000
-  stall_timeout_ms: 300000
-```
-
-- compared with the original Codex-only workflow shape, the key additions are:
-  - `agent.adapter: claude`
-  - the entire `claude:` config block
-  - Claude runtime controls such as `permission_mode`, `allowed_tools`, and Claude-specific timeouts
+- the top-level [README.md](../README.md) now quotes the exact `WORKFLOW.md` additions that enable
+  Claude integration in this fork
 
 Notes:
 
@@ -183,19 +158,6 @@ claude:
     - Read
     - Write
     - Edit
-```
-
-- The checked-in example workflow for this fork currently looks like this at a high level:
-
-```yaml
-agent:
-  adapter: claude
-codex:
-  command: codex --model gpt-5.3-codex app-server
-claude:
-  command: claude
-  model: claude-sonnet-4-6
-  permission_mode: bypassPermissions
 ```
 
 - If you route Claude through an Anthropic-compatible provider such as MiniMax, the effective model
