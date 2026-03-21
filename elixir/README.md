@@ -1,4 +1,4 @@
-# Symphony Elixir
+# Symphony Elixir With Claude and Codex Support
 
 This directory contains the current Elixir/OTP implementation of Symphony, based on
 [`SPEC.md`](../SPEC.md) at the repository root.
@@ -6,6 +6,18 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 > [!WARNING]
 > Symphony Elixir is prototype software intended for evaluation only and is presented as-is.
 > We recommend implementing your own hardened version based on `SPEC.md`.
+
+## What's Different In This Fork
+
+Relative to the original upstream Symphony reference repository, this Elixir fork now includes:
+
+- `agent.adapter` workflow selection for both `codex` and `claude`
+- Claude CLI adapter support in addition to Codex App Server support
+- Anthropic-compatible Claude backend routing, including MiniMax-style setups
+- Claude-aware stall timeout, token accounting, and rate-limit handling
+- terminal dashboard runtime labeling for Codex, Claude, and Claude-via-MiniMax
+- full retry error rendering in the dashboard instead of truncated backoff errors
+- live estimated token counts for Claude while a turn is still streaming
 
 ## Screenshot
 
@@ -113,6 +125,13 @@ You are working on a Linear issue {{ issue.identifier }}.
 Title: {{ issue.title }} Body: {{ issue.description }}
 ```
 
+Upstream workflow users should note these fork-specific changes:
+
+- the `agent:` block now accepts `adapter: codex` or `adapter: claude`
+- `claude:` is a first-class config block alongside `codex:`
+- the shipped example `WORKFLOW.md` in this fork defaults to Claude
+- the dashboard now reads runtime/provider details from both workflow config and environment
+
 Notes:
 
 - If a value is missing, defaults are used.
@@ -137,6 +156,19 @@ claude:
     - Read
     - Write
     - Edit
+```
+
+- The checked-in example workflow for this fork currently looks like this at a high level:
+
+```yaml
+agent:
+  adapter: claude
+codex:
+  command: codex --model gpt-5.3-codex app-server
+claude:
+  command: claude
+  model: claude-sonnet-4-6
+  permission_mode: bypassPermissions
 ```
 
 - If you route Claude through an Anthropic-compatible provider such as MiniMax, the effective model
@@ -241,8 +273,9 @@ actively running subagents, which is very useful during development.
 
 ### What's the easiest way to set this up for my own codebase?
 
-Launch `codex` in your repo, give it the URL to the Symphony repo, and ask it to set things up for
-you.
+Launch your preferred agent in your repo, give it the URL to the Symphony repo, and ask it to set
+things up for you. If you are using this fork specifically, mention whether you want the generated
+workflow to target `codex` or `claude`.
 
 ## License
 

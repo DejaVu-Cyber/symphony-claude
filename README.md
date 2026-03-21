@@ -1,4 +1,4 @@
-# Symphony
+# Symphony With Claude and Codex Integration
 
 Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.
@@ -13,6 +13,19 @@ _In this [demo video](.github/media/symphony-demo.mp4), Symphony monitors a Line
 
 > [!WARNING]
 > Symphony is a low-key engineering preview for testing in trusted environments.
+
+## Fork Changes
+
+Compared with the original upstream Symphony repository, this fork adds and documents:
+
+- dual runtime support for both `codex` and `claude`
+- Claude CLI orchestration in the Elixir implementation
+- Claude-compatible workflow configuration via `agent.adapter: claude`
+- support for Anthropic-compatible Claude backends such as MiniMax
+- dashboard runtime labeling for Codex, Claude, and Claude-via-MiniMax
+- dashboard error visibility improvements and live estimated token reporting for Claude sessions
+
+The detailed setup and workflow examples live in [elixir/README.md](elixir/README.md).
 
 ## Running Symphony
 
