@@ -1,5 +1,8 @@
 # Symphony With Claude and Codex Integration
 
+[Check out my Symphony Runner too!](https://github.com/philipdaquin/symphony-runner)
+
+
 Symphony turns project work into isolated, autonomous implementation runs, allowing teams to manage
 work instead of supervising coding agents.
 
