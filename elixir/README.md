@@ -15,10 +15,15 @@ This directory contains the current Elixir/OTP implementation of Symphony, based
 
 1. Polls Linear for candidate work
 2. Creates a workspace per issue
-3. Launches Codex in [App Server mode](https://developers.openai.com/codex/app-server/) inside the
-   workspace
-4. Sends a workflow prompt to Codex
-5. Keeps Codex working on the issue until the work is done
+3. Launches the configured agent runtime inside the workspace
+4. Sends a workflow prompt to that runtime
+5. Keeps the agent working on the issue until the work is done
+
+This fork supports two agent adapters:
+
+- `codex` via Codex App Server mode
+- `claude` via the Claude CLI, including Anthropic-compatible backends such as MiniMax when the
+  relevant environment overrides are provided
 
 During app-server sessions, Symphony also serves a client-side `linear_graphql` tool so that repo
 skills can make raw Linear GraphQL calls.
@@ -81,7 +86,7 @@ Optional flags:
 - `--port` also starts the Phoenix observability service (default: disabled)
 
 The `WORKFLOW.md` file uses YAML front matter for configuration, plus a Markdown body used as the
-Codex session prompt.
+agent session prompt.
 
 Minimal example:
 
@@ -96,6 +101,7 @@ hooks:
   after_create: |
     git clone git@github.com:your-org/your-repo.git .
 agent:
+  adapter: codex
   max_concurrent_agents: 10
   max_turns: 20
 codex:
@@ -110,16 +116,38 @@ Title: {{ issue.title }} Body: {{ issue.description }}
 Notes:
 
 - If a value is missing, defaults are used.
+- `agent.adapter` selects the runtime. Supported values are `codex` and `claude`.
 - Safer Codex defaults are used when policy fields are omitted:
   - `codex.approval_policy` defaults to `{"reject":{"sandbox_approval":true,"rules":true,"mcp_elicitations":true}}`
   - `codex.thread_sandbox` defaults to `workspace-write`
   - `codex.turn_sandbox_policy` defaults to a `workspaceWrite` policy rooted at the current issue workspace
+- Claude-specific settings live under the `claude:` block. Typical fields include `command`,
+  `model`, `permission_mode`, `allowed_tools`, `turn_timeout_ms`, and `stall_timeout_ms`.
+- A Claude workflow typically looks like this:
+
+```yaml
+agent:
+  adapter: claude
+claude:
+  command: claude
+  model: claude-sonnet-4-6
+  permission_mode: bypassPermissions
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+    - Edit
+```
+
+- If you route Claude through an Anthropic-compatible provider such as MiniMax, the effective model
+  can come from environment variables like `ANTHROPIC_BASE_URL` and `ANTHROPIC_MODEL` rather than
+  the literal `claude.model` string in the workflow.
 - Supported `codex.approval_policy` values depend on the targeted Codex app-server version. In the current local Codex schema, string values include `untrusted`, `on-failure`, `on-request`, and `never`, and object-form `reject` is also supported.
 - Supported `codex.thread_sandbox` values: `read-only`, `workspace-write`, `danger-full-access`.
 - When `codex.turn_sandbox_policy` is set explicitly, Symphony passes the map through to Codex
   unchanged. Compatibility then depends on the targeted Codex app-server version rather than local
   Symphony validation.
-- `agent.max_turns` caps how many back-to-back Codex turns Symphony will run in a single agent
+- `agent.max_turns` caps how many back-to-back agent turns Symphony will run in a single agent
   invocation when a turn completes normally but the issue is still in an active state. Default: `20`.
 - If the Markdown body is blank, Symphony uses a default prompt template that includes the issue
   identifier, title, and body.
@@ -165,7 +193,7 @@ The observability UI now runs on a minimal Phoenix stack:
 - `lib/`: application code and Mix tasks
 - `test/`: ExUnit coverage for runtime behavior
 - `WORKFLOW.md`: in-repo workflow contract used by local runs
-- `../.codex/`: repository-local Codex skills and setup helpers
+- `../.codex/`: repository-local agent skills and setup helpers
 
 ## Testing
 
@@ -174,7 +202,7 @@ make all
 ```
 
 Run the real external end-to-end test only when you want Symphony to create disposable Linear
-resources and launch a real `codex app-server` session:
+resources and launch a real agent session:
 
 ```bash
 cd elixir
@@ -200,8 +228,8 @@ the transport representative without depending on long-lived external machines.
 Set `SYMPHONY_LIVE_SSH_WORKER_HOSTS` if you want `make e2e` to target real SSH hosts instead.
 
 The live test creates a temporary Linear project and issue, writes a temporary `WORKFLOW.md`, runs
-a real agent turn, verifies the workspace side effect, requires Codex to comment on and close the
-Linear issue, then marks the project completed so the run remains visible in Linear.
+a real agent turn, verifies the workspace side effect, requires the configured runtime to comment on
+and close the Linear issue, then marks the project completed so the run remains visible in Linear.
 
 ## FAQ
 
