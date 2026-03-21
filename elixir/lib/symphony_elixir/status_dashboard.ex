@@ -307,15 +307,15 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp snapshot_with_samples(token_samples, now_ms) do
     case snapshot_payload() do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
-        total_tokens = Map.get(codex_totals, :total_tokens, 0)
+      {:ok, %{running: running, retrying: retrying, agent_totals: agent_totals} = snapshot} ->
+total_tokens = Map.get(agent_totals, :total_tokens, 0)
 
         {
           {:ok,
            %{
              running: running,
              retrying: retrying,
-             codex_totals: codex_totals,
+             agent_totals: agent_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }},
@@ -332,14 +332,16 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_snapshot_content(snapshot_data, tps, terminal_columns_override \\ nil) do
     case snapshot_data do
-      {:ok, %{running: running, retrying: retrying, codex_totals: codex_totals} = snapshot} ->
+      {:ok, %{running: running, retrying: retrying, agent_totals: agent_totals} = snapshot} ->
         rate_limits = Map.get(snapshot, :rate_limits)
         project_link_lines = format_project_link_lines()
         project_refresh_line = format_project_refresh_line(Map.get(snapshot, :polling))
-        codex_input_tokens = Map.get(codex_totals, :input_tokens, 0)
-        codex_output_tokens = Map.get(codex_totals, :output_tokens, 0)
-        codex_total_tokens = Map.get(codex_totals, :total_tokens, 0)
-        codex_seconds_running = Map.get(codex_totals, :seconds_running, 0)
+        codex_input_tokens = Map.get(agent_totals, :input_tokens, 0)
+        codex_output_tokens = Map.get(agent_totals, :output_tokens, 0)
+        codex_total_tokens = Map.get(agent_totals, :total_tokens, 0)
+        estimated_output_tokens = codex_output_tokens + estimated_running_output_tokens(running)
+        estimated_total_tokens = codex_total_tokens + estimated_running_total_tokens(running)
+        codex_seconds_running = Map.get(agent_totals, :seconds_running, 0)
         agent_count = length(running)
         max_agents = Config.settings!().agent.max_concurrent_agents
         running_event_width = running_event_width(terminal_columns_override)
@@ -356,12 +358,13 @@ defmodule SymphonyElixir.StatusDashboard do
            colorize("│ Throughput: ", @ansi_bold) <> colorize("#{format_tps(tps)} tps", @ansi_cyan),
            colorize("│ Runtime: ", @ansi_bold) <>
              colorize(format_runtime_seconds(codex_seconds_running), @ansi_magenta),
+           colorize("│ Agent runtime: ", @ansi_bold) <> colorize(agent_runtime_label(), @ansi_magenta),
            colorize("│ Tokens: ", @ansi_bold) <>
              colorize("in #{format_count(codex_input_tokens)}", @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("out #{format_count(codex_output_tokens)}", @ansi_yellow) <>
+             colorize(format_output_token_display(codex_output_tokens, estimated_output_tokens), @ansi_yellow) <>
              colorize(" | ", @ansi_gray) <>
-             colorize("total #{format_count(codex_total_tokens)}", @ansi_yellow),
+             colorize(format_total_token_display(codex_total_tokens, estimated_total_tokens), @ansi_yellow),
            colorize("│ Rate Limits: ", @ansi_bold) <> format_rate_limits(rate_limits),
            project_link_lines,
            project_refresh_line,
@@ -553,14 +556,14 @@ defmodule SymphonyElixir.StatusDashboard do
         %{
           running: running,
           retrying: retrying,
-          codex_totals: codex_totals
+          agent_totals: agent_totals
         } = snapshot
         when is_list(running) and is_list(retrying) ->
           {:ok,
            %{
              running: running,
              retrying: retrying,
-             codex_totals: codex_totals,
+             agent_totals: agent_totals,
              rate_limits: Map.get(snapshot, :rate_limits),
              polling: Map.get(snapshot, :polling)
            }}
@@ -594,13 +597,17 @@ defmodule SymphonyElixir.StatusDashboard do
     session = running_entry.session_id |> compact_session_id() |> format_cell(@running_session_width)
     pid = format_cell(running_entry.codex_app_server_pid || "n/a", @running_pid_width)
     total_tokens = running_entry.codex_total_tokens || 0
+    estimated_total_tokens = Map.get(running_entry, :codex_estimated_total_tokens, 0)
+    token_estimate_pending = Map.get(running_entry, :codex_token_estimate_pending, false)
     runtime_seconds = running_entry.runtime_seconds || 0
     turn_count = Map.get(running_entry, :turn_count, 0)
     age = format_cell(format_runtime_and_turns(runtime_seconds, turn_count), @running_age_width)
     event = running_entry.last_codex_event || "none"
     event_label = format_cell(summarize_message(running_entry.last_codex_message), running_event_width)
 
-    tokens = format_count(total_tokens) |> format_cell(@running_tokens_width, :right)
+    tokens =
+      format_running_token_count(total_tokens, estimated_total_tokens, token_estimate_pending)
+      |> format_cell(@running_tokens_width, :right)
 
     status_color =
       case event do
@@ -651,8 +658,7 @@ defmodule SymphonyElixir.StatusDashboard do
     else
       retrying
       |> Enum.sort_by(& &1.due_in_ms)
-      |> Enum.map_join(", ", &format_retry_summary/1)
-      |> String.split(", ")
+      |> Enum.map(&format_retry_summary/1)
     end
   end
 
@@ -695,7 +701,7 @@ defmodule SymphonyElixir.StatusDashboard do
     if sanitized == "" do
       ""
     else
-      " " <> colorize("error=#{truncate(sanitized, 96)}", @ansi_dim)
+      " " <> colorize("error=#{sanitized}", @ansi_dim)
     end
   end
 
@@ -716,6 +722,65 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_runtime_and_turns(seconds, _turn_count), do: format_runtime_seconds(seconds)
 
+  defp agent_runtime_label do
+    settings = Config.settings!()
+    adapter = settings.agent.agent_adapter
+
+    case adapter do
+      "claude" ->
+        claude_runtime_label(settings)
+
+      "codex" ->
+        "codex" <> maybe_join_detail(extract_codex_model(settings.codex.command))
+
+      other when is_binary(other) ->
+        other
+
+      _ ->
+        "unknown"
+    end
+  end
+
+  defp claude_runtime_label(settings) do
+    minimax_model = minimax_model_override()
+    claude_model = settings.claude.model
+
+    cond do
+      is_binary(minimax_model) and minimax_model != "" ->
+        "claude via minimax" <> maybe_join_detail(minimax_model)
+
+      is_binary(claude_model) and claude_model != "" ->
+        "claude" <> maybe_join_detail(claude_model)
+
+      true ->
+        "claude"
+    end
+  end
+
+  defp minimax_model_override do
+    base_url = System.get_env("ANTHROPIC_BASE_URL")
+    model = System.get_env("ANTHROPIC_MODEL")
+
+    if is_binary(base_url) and String.contains?(String.downcase(base_url), "minimax") do
+      model
+    else
+      nil
+    end
+  end
+
+  defp extract_codex_model(command) when is_binary(command) do
+    case Regex.run(~r/(?:^|\s)--model\s+(\S+)/, command, capture: :all_but_first) do
+      [model] -> model
+      _ -> nil
+    end
+  end
+
+  defp extract_codex_model(_command), do: nil
+
+  defp maybe_join_detail(nil), do: ""
+  defp maybe_join_detail(""), do: ""
+  defp maybe_join_detail(detail), do: " · " <> detail
+
   defp format_count(nil), do: "0"
 
   defp format_count(value) when is_integer(value) do
@@ -735,6 +800,55 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_count(value), do: to_string(value)
+
+  defp estimated_running_output_tokens(running) when is_list(running) do
+    Enum.reduce(running, 0, fn running_entry, acc ->
+      if Map.get(running_entry, :codex_token_estimate_pending, false) do
+        acc +
+          max(
+            0,
+            Map.get(running_entry, :codex_estimated_output_tokens, 0) -
+              Map.get(running_entry, :codex_output_tokens, 0)
+          )
+      else
+        acc
+      end
+    end)
+  end
+
+  defp estimated_running_total_tokens(running) when is_list(running) do
+    Enum.reduce(running, 0, fn running_entry, acc ->
+      if Map.get(running_entry, :codex_token_estimate_pending, false) do
+        acc +
+          max(
+            0,
+            Map.get(running_entry, :codex_estimated_total_tokens, 0) -
+              Map.get(running_entry, :codex_total_tokens, 0)
+          )
+      else
+        acc
+      end
+    end)
+  end
+
+  defp format_output_token_display(exact_tokens, estimated_tokens) when estimated_tokens > exact_tokens,
+    do: "out ~#{format_count(estimated_tokens)} est"
+
+  defp format_output_token_display(exact_tokens, _estimated_tokens),
+    do: "out #{format_count(exact_tokens)}"
+
+  defp format_total_token_display(exact_tokens, estimated_tokens) when estimated_tokens > exact_tokens,
+    do: "total ~#{format_count(estimated_tokens)} est"
+
+  defp format_total_token_display(exact_tokens, _estimated_tokens),
+    do: "total #{format_count(exact_tokens)}"
+
+  defp format_running_token_count(exact_tokens, estimated_tokens, true)
+       when estimated_tokens > exact_tokens,
+       do: "~" <> format_count(estimated_tokens)
+
+  defp format_running_token_count(exact_tokens, _estimated_tokens, _pending),
+    do: format_count(exact_tokens)
 
   defp running_table_header_row(running_event_width) do
     header =
@@ -923,6 +1037,23 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_rate_limits(nil), do: colorize("unavailable", @ansi_gray)
 
   defp format_rate_limits(rate_limits) when is_map(rate_limits) do
+    if generic_rate_limits_map?(rate_limits) do
+      requests =
+        format_generic_rate_limit_pair(
+          map_value(rate_limits, ["requests_remaining", :requests_remaining]),
+          map_value(rate_limits, ["requests_limit", :requests_limit])
+        )
+
+      tokens =
+        format_generic_rate_limit_pair(
+          map_value(rate_limits, ["tokens_remaining", :tokens_remaining]),
+          map_value(rate_limits, ["tokens_limit", :tokens_limit])
+        )
+
+      colorize("requests #{requests}", @ansi_cyan) <>
+        colorize(" | ", @ansi_gray) <>
+        colorize("tokens #{tokens}", @ansi_cyan)
+    else
     limit_id =
       map_value(rate_limits, ["limit_id", :limit_id, "limit_name", :limit_name]) ||
         "unknown"
@@ -938,6 +1069,7 @@ defmodule SymphonyElixir.StatusDashboard do
       colorize("secondary #{secondary}", @ansi_cyan) <>
       colorize(" | ", @ansi_gray) <>
       colorize(credits, @ansi_green)
+    end
   end
 
   defp format_rate_limits(other) do
@@ -996,6 +1128,18 @@ defmodule SymphonyElixir.StatusDashboard do
 
   defp format_rate_limit_bucket(other), do: to_string(other)
 
+  defp format_generic_rate_limit_pair(remaining, limit)
+       when is_integer(remaining) and is_integer(limit),
+       do: "#{format_count(remaining)}/#{format_count(limit)}"
+
+  defp format_generic_rate_limit_pair(remaining, _limit) when is_integer(remaining),
+    do: "remaining #{format_count(remaining)}"
+
+  defp format_generic_rate_limit_pair(_remaining, limit) when is_integer(limit),
+    do: "limit #{format_count(limit)}"
+
+  defp format_generic_rate_limit_pair(_remaining, _limit), do: "n/a"
+
   defp format_rate_limit_credits(nil), do: "credits n/a"
 
   defp format_rate_limit_credits(credits) when is_map(credits) do
@@ -1045,8 +1189,8 @@ defmodule SymphonyElixir.StatusDashboard do
     colorize("●", color_code)
   end
 
-  defp snapshot_total_tokens({:ok, %{codex_totals: codex_totals}}) when is_map(codex_totals) do
-    Map.get(codex_totals, :total_tokens, 0)
+  defp snapshot_total_tokens({:ok, %{agent_totals: agent_totals}}) when is_map(agent_totals) do
+    Map.get(agent_totals, :total_tokens, 0)
   end
 
   defp snapshot_total_tokens(_snapshot_data), do: 0
@@ -1618,17 +1762,33 @@ defmodule SymphonyElixir.StatusDashboard do
   defp format_rate_limits_summary(nil), do: "n/a"
 
   defp format_rate_limits_summary(rate_limits) when is_map(rate_limits) do
-    primary = map_value(rate_limits, ["primary", :primary])
-    secondary = map_value(rate_limits, ["secondary", :secondary])
+    if generic_rate_limits_map?(rate_limits) do
+      requests =
+        format_generic_rate_limit_pair(
+          map_value(rate_limits, ["requests_remaining", :requests_remaining]),
+          map_value(rate_limits, ["requests_limit", :requests_limit])
+        )
 
-    primary_text = format_rate_limit_bucket_summary(primary)
-    secondary_text = format_rate_limit_bucket_summary(secondary)
+      tokens =
+        format_generic_rate_limit_pair(
+          map_value(rate_limits, ["tokens_remaining", :tokens_remaining]),
+          map_value(rate_limits, ["tokens_limit", :tokens_limit])
+        )
 
-    cond do
-      primary_text != nil and secondary_text != nil -> "primary #{primary_text}; secondary #{secondary_text}"
-      primary_text != nil -> "primary #{primary_text}"
-      secondary_text != nil -> "secondary #{secondary_text}"
-      true -> "n/a"
+      "requests #{requests}; tokens #{tokens}"
+    else
+      primary = map_value(rate_limits, ["primary", :primary])
+      secondary = map_value(rate_limits, ["secondary", :secondary])
+
+      primary_text = format_rate_limit_bucket_summary(primary)
+      secondary_text = format_rate_limit_bucket_summary(secondary)
+
+      cond do
+        primary_text != nil and secondary_text != nil -> "primary #{primary_text}; secondary #{secondary_text}"
+        primary_text != nil -> "primary #{primary_text}"
+        secondary_text != nil -> "secondary #{secondary_text}"
+        true -> "n/a"
+      end
     end
   end
 
@@ -1651,6 +1811,24 @@ defmodule SymphonyElixir.StatusDashboard do
   end
 
   defp format_rate_limit_bucket_summary(_bucket), do: nil
+
+  defp generic_rate_limits_map?(rate_limits) when is_map(rate_limits) do
+    Enum.any?(
+      [
+        "requests_limit",
+        :requests_limit,
+        "requests_remaining",
+        :requests_remaining,
+        "tokens_limit",
+        :tokens_limit,
+        "tokens_remaining",
+        :tokens_remaining
+      ],
+      &Map.has_key?(rate_limits, &1)
+    )
+  end
+
+  defp generic_rate_limits_map?(_rate_limits), do: false
 
   defp format_error_value(%{"message" => message}) when is_binary(message), do: message
   defp format_error_value(%{message: message}) when is_binary(message), do: message

@@ -26,6 +26,7 @@ hooks:
   before_remove: |
     cd elixir && mise exec -- mix workspace.before_remove
 agent:
+  adapter: claude
   max_concurrent_agents: 10
   max_turns: 20
 codex:
@@ -34,6 +35,21 @@ codex:
   thread_sandbox: workspace-write
   turn_sandbox_policy:
     type: workspaceWrite
+claude:
+  command: claude
+  model: claude-sonnet-4-6
+  permission_mode: bypassPermissions
+  allowed_tools:
+    - Bash
+    - Read
+    - Write
+    - Edit
+    - Glob
+    - Grep
+  max_turns: 30
+  api_key: $ANTHROPIC_API_KEY
+  turn_timeout_ms: 3600000
+  stall_timeout_ms: 300000
 ---
 
 You are working on a Linear ticket `{{ issue.identifier }}`

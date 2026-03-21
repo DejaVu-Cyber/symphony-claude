@@ -6,6 +6,7 @@ defmodule SymphonyElixir.Config.Schema do
   import Ecto.Changeset
 
   alias SymphonyElixir.PathSafety
+  alias SymphonyElixir.Config.ClaudeConfig
 
   @primary_key false
 
@@ -128,6 +129,7 @@ defmodule SymphonyElixir.Config.Schema do
 
     @primary_key false
     embedded_schema do
+      field(:agent_adapter, :string, default: "codex")
       field(:max_concurrent_agents, :integer, default: 10)
       field(:max_turns, :integer, default: 20)
       field(:max_retry_backoff_ms, :integer, default: 300_000)
@@ -139,9 +141,10 @@ defmodule SymphonyElixir.Config.Schema do
       schema
       |> cast(
         attrs,
-        [:max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
+        [:agent_adapter, :max_concurrent_agents, :max_turns, :max_retry_backoff_ms, :max_concurrent_agents_by_state],
         empty_values: []
       )
+      |> validate_inclusion(:agent_adapter, ["codex", "claude", "minimax", "opencode"])
       |> validate_number(:max_concurrent_agents, greater_than: 0)
       |> validate_number(:max_turns, greater_than: 0)
       |> validate_number(:max_retry_backoff_ms, greater_than: 0)
@@ -268,6 +271,7 @@ defmodule SymphonyElixir.Config.Schema do
     embeds_one(:worker, Worker, on_replace: :update, defaults_to_struct: true)
     embeds_one(:agent, Agent, on_replace: :update, defaults_to_struct: true)
     embeds_one(:codex, Codex, on_replace: :update, defaults_to_struct: true)
+    embeds_one(:claude, ClaudeConfig, on_replace: :update, defaults_to_struct: true)
     embeds_one(:hooks, Hooks, on_replace: :update, defaults_to_struct: true)
     embeds_one(:observability, Observability, on_replace: :update, defaults_to_struct: true)
     embeds_one(:server, Server, on_replace: :update, defaults_to_struct: true)
@@ -277,6 +281,7 @@ defmodule SymphonyElixir.Config.Schema do
   def parse(config) when is_map(config) do
     config
     |> normalize_keys()
+    |> normalize_config_aliases()
     |> drop_nil_values()
     |> changeset()
     |> apply_action(:validate)
@@ -360,6 +365,7 @@ defmodule SymphonyElixir.Config.Schema do
     |> cast_embed(:worker, with: &Worker.changeset/2)
     |> cast_embed(:agent, with: &Agent.changeset/2)
     |> cast_embed(:codex, with: &Codex.changeset/2)
+    |> cast_embed(:claude, with: &ClaudeConfig.changeset/2)
     |> cast_embed(:hooks, with: &Hooks.changeset/2)
     |> cast_embed(:observability, with: &Observability.changeset/2)
     |> cast_embed(:server, with: &Server.changeset/2)
@@ -383,7 +389,12 @@ defmodule SymphonyElixir.Config.Schema do
         turn_sandbox_policy: normalize_optional_map(settings.codex.turn_sandbox_policy)
     }
 
-    %{settings | tracker: tracker, workspace: workspace, codex: codex}
+    claude = %{
+      settings.claude
+      | api_key: resolve_secret_setting(settings.claude.api_key, System.get_env("ANTHROPIC_API_KEY"))
+    }
+
+    %{settings | tracker: tracker, workspace: workspace, codex: codex, claude: claude}
   end
 
   defp normalize_keys(value) when is_map(value) do
@@ -394,6 +405,21 @@ defmodule SymphonyElixir.Config.Schema do
 
   defp normalize_keys(value) when is_list(value), do: Enum.map(value, &normalize_keys/1)
   defp normalize_keys(value), do: value
+
+  defp normalize_config_aliases(%{"agent" => agent} = config) when is_map(agent) do
+    normalized_agent =
+      case {Map.has_key?(agent, "agent_adapter"), Map.get(agent, "adapter")} do
+        {false, adapter} when is_binary(adapter) and adapter != "" ->
+          Map.put(agent, "agent_adapter", adapter)
+
+        _ ->
+          agent
+      end
+
+    Map.put(config, "agent", normalized_agent)
+  end
+
+  defp normalize_config_aliases(config), do: config
 
   defp normalize_optional_map(nil), do: nil
   defp normalize_optional_map(value) when is_map(value), do: normalize_keys(value)

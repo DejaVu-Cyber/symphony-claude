@@ -1,11 +1,16 @@
 defmodule SymphonyElixir.AgentRunner do
   @moduledoc """
-  Executes a single Linear issue in its workspace with Codex.
+  Executes a single Linear issue in its workspace using a configurable agent adapter.
+
+  Supports multiple AI coding agents via the Agent.Adapter factory:
+  - `codex` - OpenAI Codex (JSON-RPC over stdio)
+  - `claude` - Anthropic Claude Code (CLI with stream-json)
+  - `minimax` - MiniMax (CLI - TBD)
+  - `opencode` - OpenCode/Charm (CLI - TBD)
   """
 
   require Logger
-  alias SymphonyElixir.Codex.AppServer
-  alias SymphonyElixir.{Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
+  alias SymphonyElixir.{Agent, Config, Linear.Issue, PromptBuilder, Tracker, Workspace}
 
   @type worker_host :: String.t() | nil
 
@@ -79,22 +84,25 @@ defmodule SymphonyElixir.AgentRunner do
   defp run_codex_turns(workspace, issue, codex_update_recipient, opts, worker_host) do
     max_turns = Keyword.get(opts, :max_turns, Config.settings!().agent.max_turns)
     issue_state_fetcher = Keyword.get(opts, :issue_state_fetcher, &Tracker.fetch_issue_states_by_ids/1)
+    adapter_type = Config.settings!().agent.agent_adapter
 
-    with {:ok, session} <- AppServer.start_session(workspace, worker_host: worker_host) do
+    adapter = Agent.create(adapter_type)
+
+    with {:ok, session} <- adapter.start_session(workspace, worker_host: worker_host) do
       try do
-        do_run_codex_turns(session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
+        do_run_codex_turns(adapter, session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, 1, max_turns)
       after
-        AppServer.stop_session(session)
+        adapter.stop_session(session)
       end
     end
   end
 
-  defp do_run_codex_turns(app_session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
+  defp do_run_codex_turns(adapter, session, workspace, issue, codex_update_recipient, opts, issue_state_fetcher, turn_number, max_turns) do
     prompt = build_turn_prompt(issue, opts, turn_number, max_turns)
 
     with {:ok, turn_session} <-
-           AppServer.run_turn(
-             app_session,
+           adapter.run_turn(
+             session,
              prompt,
              issue,
              on_message: codex_message_handler(codex_update_recipient, issue)
@@ -106,7 +114,8 @@ defmodule SymphonyElixir.AgentRunner do
           Logger.info("Continuing agent run for #{issue_context(refreshed_issue)} after normal turn completion turn=#{turn_number}/#{max_turns}")
 
           do_run_codex_turns(
-            app_session,
+            adapter,
+            session,
             workspace,
             refreshed_issue,
             codex_update_recipient,

@@ -14,7 +14,7 @@ defmodule SymphonyElixir.Orchestrator do
   @failure_retry_base_ms 10_000
   # Slightly above the dashboard render interval so "checking now…" can render.
   @poll_transition_render_delay_ms 20
-  @empty_codex_totals %{
+  @empty_agent_totals %{
     input_tokens: 0,
     output_tokens: 0,
     total_tokens: 0,
@@ -37,8 +37,8 @@ defmodule SymphonyElixir.Orchestrator do
       completed: MapSet.new(),
       claimed: MapSet.new(),
       retry_attempts: %{},
-      codex_totals: nil,
-      codex_rate_limits: nil
+      agent_totals: nil,
+      agent_rate_limits: nil
     ]
   end
 
@@ -60,8 +60,8 @@ defmodule SymphonyElixir.Orchestrator do
       poll_check_in_progress: false,
       tick_timer_ref: nil,
       tick_token: nil,
-      codex_totals: @empty_codex_totals,
-      codex_rate_limits: nil
+      agent_totals: @empty_agent_totals,
+      agent_rate_limits: nil
     }
 
     run_terminal_workspace_cleanup()
@@ -193,8 +193,8 @@ defmodule SymphonyElixir.Orchestrator do
 
         state =
           state
-          |> apply_codex_token_delta(token_delta)
-          |> apply_codex_rate_limits(update)
+          |> apply_agent_token_delta(token_delta)
+          |> apply_agent_rate_limits(update)
 
         notify_dashboard()
         {:noreply, %{state | running: Map.put(running, issue_id, updated_running_entry)}}
@@ -446,7 +446,7 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp reconcile_stalled_running_issues(%State{} = state) do
-    timeout_ms = Config.settings!().codex.stall_timeout_ms
+    timeout_ms = adapter_stall_timeout_ms(Config.settings!())
 
     cond do
       timeout_ms <= 0 ->
@@ -479,7 +479,7 @@ defmodule SymphonyElixir.Orchestrator do
       |> terminate_running_issue(issue_id, false)
       |> schedule_issue_retry(issue_id, next_attempt, %{
         identifier: identifier,
-        error: "stalled for #{elapsed_ms}ms without codex activity"
+        error: "stalled for #{elapsed_ms}ms without agent activity"
       })
     else
       state
@@ -715,6 +715,9 @@ defmodule SymphonyElixir.Orchestrator do
             codex_input_tokens: 0,
             codex_output_tokens: 0,
             codex_total_tokens: 0,
+            codex_estimated_output_tokens: 0,
+            codex_estimated_total_tokens: 0,
+            codex_token_estimate_pending: false,
             codex_last_reported_input_tokens: 0,
             codex_last_reported_output_tokens: 0,
             codex_last_reported_total_tokens: 0,
@@ -1117,6 +1120,9 @@ defmodule SymphonyElixir.Orchestrator do
           codex_input_tokens: metadata.codex_input_tokens,
           codex_output_tokens: metadata.codex_output_tokens,
           codex_total_tokens: metadata.codex_total_tokens,
+          codex_estimated_output_tokens: Map.get(metadata, :codex_estimated_output_tokens, 0),
+          codex_estimated_total_tokens: Map.get(metadata, :codex_estimated_total_tokens, 0),
+          codex_token_estimate_pending: Map.get(metadata, :codex_token_estimate_pending, false),
           turn_count: Map.get(metadata, :turn_count, 0),
           started_at: metadata.started_at,
           last_codex_timestamp: metadata.last_codex_timestamp,
@@ -1144,8 +1150,8 @@ defmodule SymphonyElixir.Orchestrator do
      %{
        running: running,
        retrying: retrying,
-       codex_totals: state.codex_totals,
-       rate_limits: Map.get(state, :codex_rate_limits),
+agent_totals: state.agent_totals,
+        rate_limits: Map.get(state, :agent_rate_limits),
        polling: %{
          checking?: state.poll_check_in_progress == true,
          next_poll_in_ms: next_poll_in_ms(state.next_poll_due_at_ms, now_ms),
@@ -1171,6 +1177,7 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp integrate_codex_update(running_entry, %{event: event, timestamp: timestamp} = update) do
     token_delta = extract_token_delta(running_entry, update)
+    token_estimate = extract_live_token_estimate(running_entry, update)
     codex_input_tokens = Map.get(running_entry, :codex_input_tokens, 0)
     codex_output_tokens = Map.get(running_entry, :codex_output_tokens, 0)
     codex_total_tokens = Map.get(running_entry, :codex_total_tokens, 0)
@@ -1190,6 +1197,9 @@ defmodule SymphonyElixir.Orchestrator do
         codex_input_tokens: codex_input_tokens + token_delta.input_tokens,
         codex_output_tokens: codex_output_tokens + token_delta.output_tokens,
         codex_total_tokens: codex_total_tokens + token_delta.total_tokens,
+        codex_estimated_output_tokens: token_estimate.output_tokens,
+        codex_estimated_total_tokens: token_estimate.total_tokens,
+        codex_token_estimate_pending: token_estimate.pending,
         codex_last_reported_input_tokens: max(last_reported_input, token_delta.input_reported),
         codex_last_reported_output_tokens: max(last_reported_output, token_delta.output_reported),
         codex_last_reported_total_tokens: max(last_reported_total, token_delta.total_reported),
@@ -1237,9 +1247,9 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp summarize_codex_update(update) do
     %{
-      event: update[:event],
-      message: update[:payload] || update[:raw],
-      timestamp: update[:timestamp]
+      event: Map.get(update, :event),
+      message: Map.get(update, :payload) || Map.get(update, :raw),
+      timestamp: Map.get(update, :timestamp)
     }
   end
 
@@ -1277,9 +1287,9 @@ defmodule SymphonyElixir.Orchestrator do
   defp record_session_completion_totals(state, running_entry) when is_map(running_entry) do
     runtime_seconds = running_seconds(running_entry.started_at, DateTime.utc_now())
 
-    codex_totals =
+    agent_totals =
       apply_token_delta(
-        state.codex_totals,
+        state.agent_totals,
         %{
           input_tokens: 0,
           output_tokens: 0,
@@ -1288,7 +1298,7 @@ defmodule SymphonyElixir.Orchestrator do
         }
       )
 
-    %{state | codex_totals: codex_totals}
+    %{state | agent_totals: agent_totals}
   end
 
   defp record_session_completion_totals(state, _running_entry), do: state
@@ -1312,35 +1322,35 @@ defmodule SymphonyElixir.Orchestrator do
     available_slots(state) > 0 and state_slots_available?(issue, state.running)
   end
 
-  defp apply_codex_token_delta(
-         %{codex_totals: codex_totals} = state,
-         %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
-       )
-       when is_integer(input) and is_integer(output) and is_integer(total) do
-    %{state | codex_totals: apply_token_delta(codex_totals, token_delta)}
+  defp apply_agent_token_delta(
+          %{agent_totals: agent_totals} = state,
+          %{input_tokens: input, output_tokens: output, total_tokens: total} = token_delta
+        )
+        when is_integer(input) and is_integer(output) and is_integer(total) do
+    %{state | agent_totals: apply_token_delta(agent_totals, token_delta)}
   end
 
-  defp apply_codex_token_delta(state, _token_delta), do: state
+  defp apply_agent_token_delta(state, _token_delta), do: state
 
-  defp apply_codex_rate_limits(%State{} = state, update) when is_map(update) do
+  defp apply_agent_rate_limits(%State{} = state, update) when is_map(update) do
     case extract_rate_limits(update) do
       %{} = rate_limits ->
-        %{state | codex_rate_limits: rate_limits}
+        %{state | agent_rate_limits: rate_limits}
 
       _ ->
         state
     end
   end
 
-  defp apply_codex_rate_limits(state, _update), do: state
+  defp apply_agent_rate_limits(state, _update), do: state
 
-  defp apply_token_delta(codex_totals, token_delta) do
-    input_tokens = Map.get(codex_totals, :input_tokens, 0) + token_delta.input_tokens
-    output_tokens = Map.get(codex_totals, :output_tokens, 0) + token_delta.output_tokens
-    total_tokens = Map.get(codex_totals, :total_tokens, 0) + token_delta.total_tokens
+  defp apply_token_delta(agent_totals, token_delta) do
+    input_tokens = Map.get(agent_totals, :input_tokens, 0) + token_delta.input_tokens
+    output_tokens = Map.get(agent_totals, :output_tokens, 0) + token_delta.output_tokens
+    total_tokens = Map.get(agent_totals, :total_tokens, 0) + token_delta.total_tokens
 
     seconds_running =
-      Map.get(codex_totals, :seconds_running, 0) + Map.get(token_delta, :seconds_running, 0)
+      Map.get(agent_totals, :seconds_running, 0) + Map.get(token_delta, :seconds_running, 0)
 
     %{
       input_tokens: max(0, input_tokens),
@@ -1406,24 +1416,53 @@ defmodule SymphonyElixir.Orchestrator do
 
   defp extract_token_usage(update) do
     payloads = [
-      update[:usage],
+      Map.get(update, :usage),
       Map.get(update, "usage"),
       Map.get(update, :usage),
-      update[:payload],
+      Map.get(update, :payload),
       Map.get(update, "payload"),
       update
     ]
 
     Enum.find_value(payloads, &absolute_token_usage_from_payload/1) ||
+      Enum.find_value(payloads, &direct_token_usage_from_payload/1) ||
       Enum.find_value(payloads, &turn_completed_usage_from_payload/1) ||
       %{}
   end
 
+  defp extract_live_token_estimate(running_entry, update) do
+    existing_output = Map.get(running_entry, :codex_estimated_output_tokens, 0)
+    exact_output = Map.get(running_entry, :codex_output_tokens, 0)
+    exact_total = Map.get(running_entry, :codex_total_tokens, 0)
+    usage = extract_token_usage(update)
+    payload = Map.get(update, :payload) || Map.get(update, "payload") || %{}
+    event = Map.get(update, :event)
+
+    cond do
+      event in [:turn_completed, :turn_failed] or integer_token_map?(usage) ->
+        %{output_tokens: exact_output, total_tokens: exact_total, pending: false}
+
+      true ->
+        case estimate_output_tokens_from_payload(payload) do
+          estimated_output when is_integer(estimated_output) ->
+            estimated_output = max(existing_output, estimated_output)
+            %{output_tokens: estimated_output, total_tokens: max(exact_total, estimated_output), pending: true}
+
+          _ ->
+            %{
+              output_tokens: existing_output,
+              total_tokens: max(exact_total, existing_output),
+              pending: Map.get(running_entry, :codex_token_estimate_pending, false)
+            }
+        end
+    end
+  end
+
   defp extract_rate_limits(update) do
-    rate_limits_from_payload(update[:rate_limits]) ||
+    rate_limits_from_payload(Map.get(update, :rate_limits)) ||
       rate_limits_from_payload(Map.get(update, "rate_limits")) ||
       rate_limits_from_payload(Map.get(update, :rate_limits)) ||
-      rate_limits_from_payload(update[:payload]) ||
+      rate_limits_from_payload(Map.get(update, :payload)) ||
       rate_limits_from_payload(Map.get(update, "payload")) ||
       rate_limits_from_payload(update)
   end
@@ -1460,6 +1499,55 @@ defmodule SymphonyElixir.Orchestrator do
   end
 
   defp turn_completed_usage_from_payload(_payload), do: nil
+
+  defp direct_token_usage_from_payload(payload) when is_map(payload) do
+    if integer_token_map?(payload), do: payload
+  end
+
+  defp direct_token_usage_from_payload(_payload), do: nil
+
+  defp estimate_output_tokens_from_payload(%{"type" => "assistant", "message" => %{"content" => content}})
+       when is_list(content) do
+    content
+    |> Enum.reduce([], fn
+      %{"type" => "text", "text" => text}, acc when is_binary(text) -> [text | acc]
+      _, acc -> acc
+    end)
+    |> Enum.reverse()
+    |> Enum.join("")
+    |> estimate_tokens_from_text()
+  end
+
+  defp estimate_output_tokens_from_payload(%{type: "assistant", message: %{content: content}})
+       when is_list(content) do
+    content
+    |> Enum.reduce([], fn
+      %{type: "text", text: text}, acc when is_binary(text) -> [text | acc]
+      %{"type" => "text", "text" => text}, acc when is_binary(text) -> [text | acc]
+      _, acc -> acc
+    end)
+    |> Enum.reverse()
+    |> Enum.join("")
+    |> estimate_tokens_from_text()
+  end
+
+  defp estimate_output_tokens_from_payload(_payload), do: nil
+
+  defp estimate_tokens_from_text(text) when is_binary(text) do
+    trimmed = String.trim(text)
+
+    if trimmed == "" do
+      nil
+    else
+      trimmed
+      |> String.length()
+      |> Kernel./(4)
+      |> Float.ceil()
+      |> trunc()
+    end
+  end
+
+  defp estimate_tokens_from_text(_text), do: nil
 
   defp rate_limits_from_payload(payload) when is_map(payload) do
     direct = Map.get(payload, "rate_limits") || Map.get(payload, :rate_limits)
@@ -1523,10 +1611,32 @@ defmodule SymphonyElixir.Orchestrator do
         &Map.has_key?(payload, &1)
       )
 
-    !is_nil(limit_id) and has_buckets
+    generic_limit_fields? =
+      Enum.any?(
+        [
+          "requests_limit",
+          :requests_limit,
+          "requests_remaining",
+          :requests_remaining,
+          "tokens_limit",
+          :tokens_limit,
+          "tokens_remaining",
+          :tokens_remaining
+        ],
+        &Map.has_key?(payload, &1)
+      )
+
+    (!is_nil(limit_id) and has_buckets) or generic_limit_fields?
   end
 
   defp rate_limits_map?(_payload), do: false
+
+  defp adapter_stall_timeout_ms(settings) do
+    case settings.agent.agent_adapter do
+      "claude" -> settings.claude.stall_timeout_ms
+      _ -> settings.codex.stall_timeout_ms
+    end
+  end
 
   defp explicit_map_at_paths(payload, paths) when is_map(payload) and is_list(paths) do
     Enum.find_value(paths, fn path ->
