@@ -200,6 +200,43 @@ codex:
 - `server.port` or CLI `--port` enables the optional Phoenix LiveView dashboard and JSON API at
   `/`, `/api/v1/state`, `/api/v1/<issue_identifier>`, and `/api/v1/refresh`.
 
+## Debug Session Logs
+
+Every agent session (Codex and Claude) is automatically logged to
+`{logs-root}/log/session-logs/` as a JSONL transcript file. Each file captures every raw message
+sent to and received from the agent process, making it straightforward to diagnose protocol-level
+issues after the fact.
+
+**Filename format:** `{adapter}_{issue-identifier}_{session-id}_{timestamp}.jsonl`
+
+For example: `codex_MT-620_thread1-turn3_20260325T100000.jsonl`
+
+**Each line is a JSON object:**
+
+```json
+{"ts":"2026-03-25T10:00:00.123Z","dir":"sent","data":"{\"method\":\"turn/start\",...}"}
+{"ts":"2026-03-25T10:00:01.456Z","dir":"recv","data":"{\"method\":\"turn/completed\",...}"}
+```
+
+- `ts`: UTC timestamp of the log entry
+- `dir`: `sent` for messages to the agent, `recv` for messages from the agent
+- `data`: the raw string exactly as transmitted
+
+The `--logs-root` flag controls the parent directory. With the default log root, session logs live
+at `./log/session-logs/`.
+
+**Cleanup:** Session logs can grow during extended debugging. Remove them when no longer needed:
+
+```bash
+rm -rf log/session-logs/
+```
+
+Or, if using a custom logs root:
+
+```bash
+rm -rf /your/logs-root/log/session-logs/
+```
+
 ## Web dashboard
 
 The observability UI now runs on a minimal Phoenix stack:

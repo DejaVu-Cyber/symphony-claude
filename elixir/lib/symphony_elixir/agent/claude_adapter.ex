@@ -12,7 +12,7 @@ defmodule SymphonyElixir.Agent.ClaudeAdapter do
 
   require Logger
 
-  alias SymphonyElixir.{Agent.Behaviour, Agent.Event, Config, PathSafety}
+  alias SymphonyElixir.{Agent.Behaviour, Agent.Event, Config, PathSafety, SessionLogger}
 
   @behaviour Behaviour
 
@@ -74,6 +74,15 @@ defmodule SymphonyElixir.Agent.ClaudeAdapter do
     session_id = nil
     turn_id = to_string(System.system_time(:millisecond))
 
+    session_log =
+      case SessionLogger.open(:claude, issue, turn_id) do
+        {:ok, handle} -> handle
+        {:error, _} -> nil
+      end
+
+    Process.put(:session_log, session_log)
+    SessionLogger.log_sent(session_log, prompt)
+
     state = %{
       session: %{session | port: port, pid: os_pid},
       issue: issue,
@@ -90,6 +99,8 @@ defmodule SymphonyElixir.Agent.ClaudeAdapter do
       try do
         await_completion(state)
       after
+        SessionLogger.close(session_log)
+        Process.delete(:session_log)
         Port.close(port)
         File.rm(prompt_file)
       end
@@ -290,6 +301,7 @@ defmodule SymphonyElixir.Agent.ClaudeAdapter do
     receive do
       {^port, {:data, {:eol, chunk}}} ->
         complete_line = pending_line <> to_string(chunk)
+        SessionLogger.log_received(Process.get(:session_log), complete_line)
         handle_line(state, complete_line, session_id)
 
       {^port, {:data, {:noeol, chunk}}} ->
@@ -357,18 +369,9 @@ defmodule SymphonyElixir.Agent.ClaudeAdapter do
 
         pid = payload["pid"] || state.session.pid
 
-        if stop_reason in ["end_turn", "max_turns"] do
-          %Event{
-            event: :turn_completed,
-            timestamp: DateTime.utc_now(),
-            agent_pid: pid,
-            session_id: session_id,
-            usage: usage,
-            stop_reason: stop_reason,
-            rate_limits: rate_limits,
-            payload: payload
-          }
-        else
+        known_failure_reasons = ["error", "error_result"]
+
+        if stop_reason in known_failure_reasons do
           %Event{
             event: :turn_failed,
             timestamp: DateTime.utc_now(),
@@ -377,6 +380,21 @@ defmodule SymphonyElixir.Agent.ClaudeAdapter do
             usage: usage,
             stop_reason: stop_reason,
             error: "stop_reason=#{stop_reason}",
+            rate_limits: rate_limits,
+            payload: payload
+          }
+        else
+          if stop_reason not in ["end_turn", "max_turns", "tool_use"] do
+            Logger.warning("Claude session completed with unexpected stop_reason=#{stop_reason}; treating as success")
+          end
+
+          %Event{
+            event: :turn_completed,
+            timestamp: DateTime.utc_now(),
+            agent_pid: pid,
+            session_id: session_id,
+            usage: usage,
+            stop_reason: stop_reason,
             rate_limits: rate_limits,
             payload: payload
           }
