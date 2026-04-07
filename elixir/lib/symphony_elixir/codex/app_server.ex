@@ -88,17 +88,19 @@ defmodule SymphonyElixir.Codex.AppServer do
         DynamicTool.execute(tool, arguments)
       end)
 
+    turn_log_id = "#{thread_id}-#{System.system_time(:millisecond)}"
+
+    session_log =
+      case SessionLogger.open(:codex, issue, turn_log_id) do
+        {:ok, handle} -> handle
+        {:error, _} -> nil
+      end
+
+    Process.put(:session_log, session_log)
+
     case start_turn(port, thread_id, prompt, issue, workspace, approval_policy, turn_sandbox_policy) do
       {:ok, turn_id} ->
         session_id = "#{thread_id}-#{turn_id}"
-
-        session_log =
-          case SessionLogger.open(:codex, issue, session_id) do
-            {:ok, handle} -> handle
-            {:error, _} -> nil
-          end
-
-        Process.put(:session_log, session_log)
         Logger.info("Codex session started for #{issue_context(issue)} session_id=#{session_id}")
 
         emit_message(
@@ -146,6 +148,8 @@ defmodule SymphonyElixir.Codex.AppServer do
         result
 
       {:error, reason} ->
+        SessionLogger.close(session_log)
+        Process.delete(:session_log)
         Logger.error("Codex session failed for #{issue_context(issue)}: #{inspect(reason)}")
         emit_message(on_message, :startup_failed, %{reason: reason}, metadata)
         {:error, reason}
